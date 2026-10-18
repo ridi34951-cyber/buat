@@ -1,0 +1,133 @@
+name: Build GyroLock Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gyrolock-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      ANDROID_COMPILE_SDK: '35'
+      ANDROID_BUILD_TOOLS: '35.0.0'
+      ANDROID_NDK_VERSION: '27.2.12479018'
+      ANDROID_CMAKE_VERSION: '3.22.1'
+      GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+
+      - name: Install Android SDK packages required by this project
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;${ANDROID_CMAKE_VERSION}"
+
+      - name: Install Vulkan shader compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends glslang-tools
+          command -v glslangValidator
+          glslangValidator --version
+
+      - name: Set up Gradle compatible with Android Gradle Plugin 8.7.3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-read-only: false
+
+      - name: Verify build inputs and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f settings.gradle
+          test -f build.gradle
+          test -f gradle.properties
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/cpp/CMakeLists.txt
+          test -f app/src/main/cpp/gyrolock_vulkan.cpp
+          test -f app/src/main/cpp/fullscreen.vert
+          test -f app/src/main/cpp/stabilize.frag
+          java -version
+          gradle --version
+          sdkmanager --list_installed
+
+      - name: Compile and validate Vulkan shaders
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gyrolock-shaders
+          glslangValidator -V app/src/main/cpp/fullscreen.vert -o /tmp/gyrolock-shaders/fullscreen.vert.spv
+          glslangValidator -V app/src/main/cpp/stabilize.frag -o /tmp/gyrolock-shaders/stabilize.frag.spv
+          test -s /tmp/gyrolock-shaders/fullscreen.vert.spv
+          test -s /tmp/gyrolock-shaders/stabilize.frag.spv
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace --warning-mode all assembleDebug
+
+      - name: Verify debug APK exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit | grep -q .
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GyroLock-Motion-Photo-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GyroLock-build-diagnostics
+          path: |
+            **/build/reports/**
+            **/build/outputs/logs/**
+            **/build/tmp/**
+          if-no-files-found: ignore
+          retention-days: 14
